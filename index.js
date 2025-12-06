@@ -305,9 +305,9 @@ async function startGame(token, gameId, proxy, context) {
   const spinner = ora({ text: 'Starting game...', spinner: 'dots' }).start();
   try {
     const response = await requestWithRetry('post', url, payload, config, 3, 2000, context);
-    if (response.data.success) {
+    if (response && response.data && response.data.success) {
       spinner.succeed(chalk.bold.greenBright(` Game started`));
-      return response.data.data.id;
+      return response.data.data;
     } else {
       throw new Error('Failed to start game');
     }
@@ -336,33 +336,157 @@ async function abandonGame(token, sessionId, proxy, context) {
   }
 }
 
-async function completeGame(token, sessionId, score, duration, assetsClicked, difficulty, proxy, context) {
-  const url = `https://kingdom.solflare.com/api/v1/games/complete/${sessionId}`;
-  const payload = {
+function randInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+function randFloat(min, max, decimals = 2) {
+  const v = Math.random() * (max - min) + min;
+  return Number(v.toFixed(decimals));
+}
+function pickWeighted(weights) {
+  const total = weights.reduce((s, x) => s + x.w, 0);
+  let r = Math.random() * total;
+  for (const it of weights) {
+    r -= it.w;
+    if (r <= 0) return it.v;
+  }
+  return weights[weights.length - 1].v;
+}
+
+function mapDifficultyFromMeta(metaDifficultyLabel, score) {
+  let baseMin = 450;
+  let baseMax = 520;
+  if (!metaDifficultyLabel) metaDifficultyLabel = 'medium';
+  const label = String(metaDifficultyLabel).toLowerCase();
+  if (label.includes('easy')) {
+    baseMin = 320; baseMax = 460;
+  } else if (label.includes('medium')) {
+    baseMin = 460; baseMax = 620;
+  } else if (label.includes('hard')) {
+    baseMin = 600; baseMax = 820;
+  } else {
+    baseMin = 440; baseMax = 640;
+  }
+
+  const scoreFactor = Math.floor(score / 20);
+  const base = randInt(baseMin, baseMax);
+  const difficulty = Math.max(100, Math.min(1000, base + scoreFactor + randInt(-20, 20)));
+  return difficulty;
+}
+
+
+function generateGameData({
+  score,
+  playTimeSec,
+  duration,
+  pointsPerAsset = { regular: 1, special: 10, powerup: 0 },
+  calculatedDuration = 30,
+  difficultyMetaLabel = null,
+  completionToken = null,
+  totalAssetsSpawnedOverride = null
+}) {
+  const playTime = (typeof playTimeSec === 'number' && !Number.isNaN(playTimeSec))
+    ? playTimeSec
+    : ((typeof duration === 'number' && !Number.isNaN(duration)) ? duration : randInt(40, 60));
+
+  const powerupsClicked = randInt(6, 13);
+
+  const freezePerPowerupMin = 0.9;
+  const freezePerPowerupMax = 2.2;
+  let freezeTime = 0;
+  for (let i = 0; i < powerupsClicked; i++) {
+    freezeTime += randFloat(freezePerPowerupMin, freezePerPowerupMax, 3);
+  }
+  freezeTime = Number(freezeTime.toFixed(3));
+
+  const rawDuration = playTime + freezeTime;
+  const clientReportedDuration = Number((rawDuration + randFloat(-1.2, 1.2)).toFixed(2));
+  const durationVal = Number(Math.max(0.5, clientReportedDuration).toFixed(2));
+
+  const bombsClicked = randInt(0, Math.min(3, Math.floor(Math.random() * 3)));
+
+  const specialPoint = Math.max(1, pointsPerAsset.special || 10);
+  const estSpecial = Math.min(randInt(0, Math.floor(score / specialPoint) + 1), Math.max(0, Math.floor(score / specialPoint)));
+  const specialAssetsClicked = estSpecial;
+
+  const regularValue = Math.max(1, pointsPerAsset.regular || 1);
+  const remPoints = Math.max(0, score - (specialAssetsClicked * specialPoint));
+  const regularAssetsClicked = Math.max(0, Math.round(remPoints / regularValue));
+
+  let assetsClicked = Math.max(0, randInt(Math.floor(regularAssetsClicked / 2), regularAssetsClicked + specialAssetsClicked));
+  if (Math.random() < 0.6) assetsClicked += powerupsClicked;
+  if (bombsClicked > 0 && Math.random() < 0.5) assetsClicked += bombsClicked;
+
+  const safeCalculatedDuration = (typeof calculatedDuration === 'number' && calculatedDuration > 0) ? calculatedDuration : 30;
+  const baseSpawn = Math.max(120, Math.floor((playTime / safeCalculatedDuration) * 200) + Math.floor(score * 1.2));
+  const totalAssetsSpawned = totalAssetsSpawnedOverride || randInt(baseSpawn, baseSpawn + 220);
+
+  const diff = mapDifficultyFromMeta(difficultyMetaLabel, score);
+
+  const timeRemaining = 0;
+  const completionTok = completionToken || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return {
     score,
     gameData: {
-      duration,
-      assetsClicked,
-      difficulty,
-      timeRemaining: 0,
-      calculatedDuration: 30
+      duration: Number.isFinite(durationVal) ? durationVal : 0.0,
+      clientReportedDuration: Number.isFinite(durationVal) ? durationVal : 0.0,
+      assetsClicked: Number.isFinite(assetsClicked) ? assetsClicked : 0,
+      regularAssetsClicked: Number.isFinite(regularAssetsClicked) ? regularAssetsClicked : 0,
+      specialAssetsClicked: Number.isFinite(specialAssetsClicked) ? specialAssetsClicked : 0,
+      bombsClicked: Number.isFinite(bombsClicked) ? bombsClicked : 0,
+      powerupsClicked: Number.isFinite(powerupsClicked) ? powerupsClicked : 0,
+      totalAssetsSpawned: Number.isFinite(totalAssetsSpawned) ? totalAssetsSpawned : 0,
+      freezeTimeUsed: Number.isFinite(freezeTime) ? freezeTime : 0.0,
+      difficulty: Number.isFinite(diff) ? diff : 0,
+      timeRemaining,
+      calculatedDuration: safeCalculatedDuration,
+      completionToken: completionTok
     }
   };
+}
+
+async function completeGame(token, sessionObj, score, playTimeSec, difficulty, pointsPerAsset, proxy, context) {
+  if (!sessionObj || !sessionObj.id) {
+    logger.error('Invalid session object passed to completeGame', { context });
+    return { ok: false, reason: 'invalid_session' };
+  }
+  const sessionId = sessionObj.id;
+  const serverCompletionToken = sessionObj.gameData && sessionObj.gameData.completionToken ? sessionObj.gameData.completionToken : null;
+
+  const calculatedDuration = (sessionObj.game && sessionObj.game.metadata && sessionObj.game.metadata.gameDuration) ? sessionObj.game.metadata.gameDuration : 30;
+  const difficultyLabel = (sessionObj.game && sessionObj.game.metadata && sessionObj.game.metadata.difficulty) ? sessionObj.game.metadata.difficulty : null;
+
+  const payload = generateGameData({
+    score,
+    playTimeSec,
+    pointsPerAsset: pointsPerAsset || { regular: 1, special: 10, powerup: 0 },
+    calculatedDuration,
+    difficultyMetaLabel: difficultyLabel,
+    completionToken: serverCompletionToken
+  });
+
+  const url = `https://kingdom.solflare.com/api/v1/games/complete/${sessionId}`;
   const config = getAxiosConfig(proxy, token);
+  config.validateStatus = (status) => status >= 200 && status < 500;
   const spinner = ora({ text: 'Completing game...', spinner: 'dots' }).start();
+
   try {
     const response = await requestWithRetry('post', url, payload, config, 3, 2000, context);
-    if (response.data.success) {
+
+    if (response && response.data && response.data.success) {
       spinner.succeed(chalk.bold.greenBright(` Game Completed Successfully, Points + ${score}`));
-      return true;
+      return { ok: true, payload, response: response.data };
     } else {
-      throw new Error('Failed to complete game');
+      spinner.fail(chalk.bold.yellowBright(` Server rejected completion`));
+      logger.warn('CompleteGame rejected by server', { context });
+      return { ok: false, payload, response: response ? response.data : null };
     }
   } catch (error) {
     spinner.fail(chalk.bold.redBright(` Failed to complete game: ${error.message}`));
-    return false;
+    return { ok: false, payload, error: error.message };
   }
 }
+
 
 function calculateAssetsClicked(score, pointsPerAsset) {
   const specialCount = Math.floor(Math.random() * (Math.floor(score / 10) + 1));
@@ -421,19 +545,28 @@ async function processAccount(token, index, total, proxy) {
         printInfo('Ticket Cost', ticketCost, context);
         console.log();
 
-        const sessionId = await startGame(token, gameId, proxy, context);
-        if (!sessionId) continue;
+                const session = await startGame(token, gameId, proxy, context);
+        if (!session) continue;
 
-        const playDelay = Math.floor(Math.random() * (55 - 30 + 1)) + 30;
-        await countdown(playDelay, 'Playing game ');
-
-        await abandonGame(token, sessionId, proxy, context);
+        const playTime = Math.floor(Math.random() * (60 - 40 + 1)) + 40;
+        await countdown(playTime, 'Playing game ');
+        const abandoned = await abandonGame(token, session.id, proxy, context);
+        if (!abandoned) {
+          logger.warn('Abandon failed; skipping complete', { context });
+          continue;
+        }
 
         const score = Math.floor(Math.random() * (900 - 500 + 1)) + 500;
-        const difficulty = Math.floor(Math.random() * (700 - 580 + 1)) + 580 + Math.floor(score / 100);
-        const assetsClicked = calculateAssetsClicked(score, pointsPerAsset);
 
-        await completeGame(token, sessionId, score, playDelay, assetsClicked, difficulty, proxy, context);
+        const difficultyLabel = (session.game && session.game.metadata && session.game.metadata.difficulty) ? session.game.metadata.difficulty : 'medium';
+        const difficulty = mapDifficultyFromMeta(difficultyLabel, score);
+
+        const result = await completeGame(token, session, score, playTime, difficulty, pointsPerAsset, proxy, context);
+
+
+        if (!result.ok) {
+          logger.warn('Complete game failed or rejected by server', { context, emoji: '⚠️' });
+        } 
 
         bar.tick();
         remainingTickets -= ticketCost;
