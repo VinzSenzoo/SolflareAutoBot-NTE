@@ -424,6 +424,7 @@ function generateGameData({
   const diff = mapDifficultyFromMeta(difficultyMetaLabel, score);
 
   const timeRemaining = 0;
+  const calculated= 30;
   const completionTok = completionToken || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return {
     score,
@@ -439,8 +440,8 @@ function generateGameData({
       freezeTimeUsed: Number.isFinite(freezeTime) ? freezeTime : 0.0,
       difficulty: Number.isFinite(diff) ? diff : 0,
       timeRemaining,
-      calculatedDuration: safeCalculatedDuration,
-      completionToken: completionTok
+      calculatedDuration: calculated,
+      gameSeed: completionTok
     }
   };
 }
@@ -545,7 +546,7 @@ async function processAccount(token, index, total, proxy) {
         printInfo('Ticket Cost', ticketCost, context);
         console.log();
 
-                const session = await startGame(token, gameId, proxy, context);
+        const session = await startGame(token, gameId, proxy, context);
         if (!session) continue;
 
         const playTime = Math.floor(Math.random() * (60 - 40 + 1)) + 40;
@@ -556,7 +557,7 @@ async function processAccount(token, index, total, proxy) {
           continue;
         }
 
-        const score = Math.floor(Math.random() * (900 - 500 + 1)) + 500;
+        const score = Math.floor(Math.random() * (450 - 300 + 1)) + 300;
 
         const difficultyLabel = (session.game && session.game.metadata && session.game.metadata.difficulty) ? session.game.metadata.difficulty : 'medium';
         const difficulty = mapDifficultyFromMeta(difficultyLabel, score);
@@ -567,6 +568,12 @@ async function processAccount(token, index, total, proxy) {
         if (!result.ok) {
           logger.warn('Complete game failed or rejected by server', { context, emoji: '⚠️' });
         } 
+
+        userInfo = await fetchUserInfo(token, proxy, context);
+        console.log();
+        printInfo('Total Points', userInfo.totalPoints, context);
+        console.log();
+        console.log();
 
         bar.tick();
         remainingTickets -= ticketCost;
