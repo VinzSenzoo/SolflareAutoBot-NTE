@@ -573,9 +573,10 @@ async function processAccount(token, index, total, proxy) {
         console.log();
         printInfo('Total Points', userInfo.totalPoints, context);
         console.log();
-        console.log();
+        
 
         bar.tick();
+        console.log();
         remainingTickets -= ticketCost;
         
         if (i < maxPlays - 1) {
